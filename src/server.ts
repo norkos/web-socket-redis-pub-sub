@@ -1,6 +1,5 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
-import { randomUUID } from 'crypto';
 
 const PORT = process.env.PORT || 8080;
 
@@ -17,6 +16,9 @@ const wss = new WebSocketServer({
 // Store connected clients
 const clients = new Set<WebSocket>();
 
+// Track client count per IP address for human-readable IDs
+const ipClientCounts = new Map<string, number>();
+
 // Extend WebSocket to store client metadata
 interface ClientWebSocket extends WebSocket {
   clientId?: string;
@@ -24,8 +26,15 @@ interface ClientWebSocket extends WebSocket {
 }
 
 wss.on('connection', (ws: WebSocket, req) => {
-  const clientIp = req.socket.remoteAddress;
-  const clientId = randomUUID();
+  const clientIp = req.socket.remoteAddress || 'unknown';
+  
+  // Get or initialize the counter for this IP
+  const currentCount = ipClientCounts.get(clientIp) || 0;
+  const nextCount = currentCount + 1;
+  ipClientCounts.set(clientIp, nextCount);
+  
+  // Create human-readable client ID: IP-1, IP-2, etc.
+  const clientId = `${clientIp}-${nextCount}`;
   
   // Store client metadata on the WebSocket object
   (ws as ClientWebSocket).clientId = clientId;
