@@ -25,24 +25,45 @@ function getClientId(): string {
   return randomUUID();
 }
 
-// Get topics from command line argument (--topics) or environment variable (TOPICS)
-// Usage: npm run client -- --name Alice --topics topic-Bob,topic-Charlie
-// Or: TOPICS=topic-Bob,topic-Charlie npm run client
+// Get friends from command line argument (--friend) or environment variable (FRIENDS)
+// Usage: npm run client -- --name Alice --friend Bob,Charlie
+// Or: FRIENDS=Bob,Charlie npm run client
+// Friend names are automatically prefixed with "topic-" to create topic names
 function getTopics(): string[] {
   const args = process.argv.slice(2);
+  let friends: string[] = [];
   
-  // Check command line arguments for --topics
-  const topicsIndex = args.indexOf('--topics');
-  if (topicsIndex !== -1 && args[topicsIndex + 1]) {
-    return args[topicsIndex + 1].split(',').map(t => t.trim()).filter(t => t);
+  // Check command line arguments for --friend
+  const friendIndex = args.indexOf('--friend');
+  if (friendIndex !== -1 && args[friendIndex + 1]) {
+    friends = args[friendIndex + 1].split(',').map(f => f.trim()).filter(f => f);
+  } else if (process.env.FRIENDS) {
+    // Check environment variable
+    friends = process.env.FRIENDS.split(',').map(f => f.trim()).filter(f => f);
   }
   
-  // Check environment variable
-  if (process.env.TOPICS) {
-    return process.env.TOPICS.split(',').map(t => t.trim()).filter(t => t);
+  // Add "topic-" prefix to each friend name
+  return friends.map(friend => `topic-${friend}`);
+}
+
+// Get debug flag from command line argument (--debug) or environment variable (DEBUG)
+// Usage: npm run client -- --debug
+// Or: DEBUG=true npm run client
+function getDebugFlag(): boolean {
+  const args = process.argv.slice(2);
+  if (args.includes('--debug')) {
+    return true;
   }
-  
-  return [];
+  return process.env.DEBUG === 'true' || process.env.DEBUG === '1';
+}
+
+const DEBUG = getDebugFlag();
+
+// Debug logging function
+function debugLog(...args: any[]): void {
+  if (DEBUG) {
+    console.log(...args);
+  }
 }
 
 const CLIENT_ID = getClientId();
@@ -57,7 +78,7 @@ function fetchWebSocketUrl(clientId: string, topics: string[]): Promise<string> 
       url.searchParams.set('topics', topics.join(','));
     }
     
-    console.log(`📡 Fetching WebSocket URL from ${url.toString()}...`);
+    debugLog(`📡 Fetching WebSocket URL from ${url.toString()}...`);
     
     get(url.toString(), (res) => {
       let data = '';
@@ -72,7 +93,7 @@ function fetchWebSocketUrl(clientId: string, topics: string[]): Promise<string> 
           const websocketUrl = response.websocket?.url;
           
           if (websocketUrl) {
-            console.log(`✅ Got WebSocket URL: ${websocketUrl}`);
+            debugLog(`✅ Got WebSocket URL: ${websocketUrl}`);
             resolve(websocketUrl);
           } else {
             reject(new Error('WebSocket URL not found in server response'));
@@ -91,18 +112,18 @@ function fetchWebSocketUrl(clientId: string, topics: string[]): Promise<string> 
 async function connectToWebSocket() {
   try {
     const WEBSOCKET_URL = await fetchWebSocketUrl(CLIENT_ID, INITIAL_TOPICS);
-    console.log(`Client ID: ${CLIENT_ID}`);
+    debugLog(`Client ID: ${CLIENT_ID}`);
     if (INITIAL_TOPICS.length > 0) {
-      console.log(`Subscribing to topics: ${INITIAL_TOPICS.join(', ')}`);
+      debugLog(`Subscribing to friend topics: ${INITIAL_TOPICS.join(', ')}`);
     }
-    console.log(`🔌 Connecting to ${WEBSOCKET_URL}...`);
+    debugLog(`🔌 Connecting to ${WEBSOCKET_URL}...`);
     
     // Create WebSocket connection
     const ws = new WebSocket(WEBSOCKET_URL);
 
     // Connection opened
     ws.on('open', () => {
-      console.log('✅ Connected to WebSocket server');
+      debugLog('✅ Connected to WebSocket server');
       
       // If topics weren't provided in URL, subscribe via message (if needed)
       // The server already handles topics from URL query params
@@ -111,7 +132,7 @@ async function connectToWebSocket() {
       const interval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           const message = {
-            text: `Sending geolocation from ${CLIENT_ID}`,
+            text: ` ${CLIENT_ID} updating geolocation`,
             clientId: CLIENT_ID,
             timestamp: new Date().toISOString()
           };
@@ -119,7 +140,7 @@ async function connectToWebSocket() {
           ws.send(JSON.stringify(message));
           console.log(`📤 Sent message: ${message.text}`);
         } else {
-          console.log('⚠️  WebSocket not open, clearing interval');
+          debugLog('⚠️  WebSocket not open, clearing interval');
           clearInterval(interval);
         }
       }, 20000); // 20 seconds
@@ -127,7 +148,7 @@ async function connectToWebSocket() {
       // Clean up interval on close
       ws.on('close', () => {
         clearInterval(interval);
-        console.log('Interval cleared');
+        debugLog('Interval cleared');
       });
     });
 
@@ -137,19 +158,21 @@ async function connectToWebSocket() {
         const message = JSON.parse(data.toString());
         
         if (message.type === 'topic-message') {
+          // Keep message content as regular log (not debug)
           console.log(`📥 Received message from topic "${message.topic}":`, message.data);
         } else if (message.type === 'welcome') {
-          console.log('📥 Welcome message:', message);
+          debugLog('📥 Welcome message:', message);
           if (message.subscribedTopics && message.subscribedTopics.length > 0) {
-            console.log(`✅ Subscribed to topics: ${message.subscribedTopics.join(', ')}`);
+            debugLog(`✅ Subscribed to topics: ${message.subscribedTopics.join(', ')}`);
           }
         } else if (message.type === 'subscribed') {
-          console.log(`✅ Subscribed to topics: ${message.topics.join(', ')}`);
-          console.log(`📋 All subscribed topics: ${message.allSubscribedTopics.join(', ')}`);
+          debugLog(`✅ Subscribed to topics: ${message.topics.join(', ')}`);
+          debugLog(`📋 All subscribed topics: ${message.allSubscribedTopics.join(', ')}`);
         } else if (message.type === 'unsubscribed') {
-          console.log(`❌ Unsubscribed from topics: ${message.topics.join(', ')}`);
-          console.log(`📋 All subscribed topics: ${message.allSubscribedTopics.join(', ')}`);
+          debugLog(`❌ Unsubscribed from topics: ${message.topics.join(', ')}`);
+          debugLog(`📋 All subscribed topics: ${message.allSubscribedTopics.join(', ')}`);
         } else {
+          // Keep message content as regular log (not debug)
           console.log('📥 Received:', message);
         }
       } catch (error) {
@@ -159,24 +182,24 @@ async function connectToWebSocket() {
 
     // Handle errors
     ws.on('error', (error) => {
-      console.error('❌ WebSocket error:', error);
+      debugLog('❌ WebSocket error:', error);
     });
 
     // Handle connection close
     ws.on('close', (code, reason) => {
-      console.log(`🔌 Connection closed. Code: ${code}, Reason: ${reason.toString()}`);
+      debugLog(`🔌 Connection closed. Code: ${code}, Reason: ${reason.toString()}`);
       process.exit(0);
     });
 
     // Graceful shutdown
     process.on('SIGINT', () => {
-      console.log('\n🛑 Shutting down client...');
+      debugLog('\n🛑 Shutting down client...');
       ws.close();
       process.exit(0);
     });
     
   } catch (error) {
-    console.error('❌ Failed to connect:', error);
+    debugLog('❌ Failed to connect:', error);
     process.exit(1);
   }
 }

@@ -8,6 +8,9 @@ A WebSocket server built with Node.js and TypeScript.
 - TypeScript support
 - Client connection management
 - Redis PUB/SUB integration
+- Topic subscription system for clients
+- REST API endpoints for WebSocket info and client list
+- Debug logging support
 - Graceful shutdown handling
 
 ## Installation
@@ -69,17 +72,49 @@ CLIENT_NAME=Bob npm run client
 
 If no name is provided, the client will use a random UUID as the client ID.
 
-**Example: Running multiple client instances:**
+#### Topic Subscription (Friends)
+
+Clients can subscribe to topics (friend topics) to receive messages published to those topics. Friend names are automatically prefixed with "topic-" to create topic names.
+
+**Using command line argument:**
 ```bash
-# Terminal 1
-npm run client -- --name Alice
-
-# Terminal 2
-npm run client -- --name Bob
-
-# Terminal 3
-npm run client -- --name Charlie
+npm run client -- --name Alice --friend Bob,Charlie
 ```
+
+**Using environment variable:**
+```bash
+FRIENDS=Bob,Charlie npm run client -- --name Alice
+```
+
+This will subscribe Alice to `topic-Bob` and `topic-Charlie`. When messages are published to these topics in Redis, Alice will receive them.
+
+**Example: Running multiple client instances with friend subscriptions:**
+```bash
+# Terminal 1 - Alice subscribes to Bob and Charlie
+npm run client -- --name Alice --friend Bob,Charlie
+
+# Terminal 2 - Bob subscribes to Alice
+npm run client -- --name Bob --friend Alice
+
+# Terminal 3 - Charlie subscribes to Alice
+npm run client -- --name Charlie --friend Alice
+```
+
+#### Debug Logging
+
+Enable debug logging to see detailed connection, subscription, and message information:
+
+**Using command line argument:**
+```bash
+npm run client -- --name Alice --debug
+```
+
+**Using environment variable:**
+```bash
+DEBUG=true npm run client -- --name Alice
+```
+
+By default, only received message content is logged. With debug enabled, you'll see connection status, subscription events, and other operational logs.
 
 ### Connecting with a WebSocket Client
 
@@ -123,9 +158,57 @@ Send messages as JSON:
 
 The server sends different message types:
 
-- `welcome`: Sent when a client connects
-- `echo`: Echo of your message
+- `welcome`: Sent when a client connects, includes `clientId`, `redisTopic`, and `subscribedTopics`
+- `topic-message`: Messages received from subscribed topics, includes `topic` and `data`
+- `subscribed`: Confirmation when subscribing to topics, includes `topics` and `allSubscribedTopics`
+- `unsubscribed`: Confirmation when unsubscribing from topics, includes `topics` and `allSubscribedTopics`
 - `error`: Error messages
+
+### Topic Subscription
+
+Clients can subscribe to topics dynamically after connection:
+
+**Subscribe to topics:**
+```json
+{
+  "type": "subscribe",
+  "topics": ["topic-Bob", "topic-Charlie"]
+}
+```
+
+**Unsubscribe from topics:**
+```json
+{
+  "type": "unsubscribe",
+  "topics": ["topic-Bob"]
+}
+```
+
+### API Endpoints
+
+The server provides REST API endpoints:
+
+**Get WebSocket connection information:**
+```bash
+GET /api/websocket?clientId=Alice&topics=topic-Bob,topic-Charlie
+```
+
+**Get list of connected clients:**
+```bash
+GET /api/clients
+```
+
+Returns:
+```json
+{
+  "clients": [
+    { "clientId": "Alice" },
+    { "clientId": "Bob" }
+  ],
+  "count": 2,
+  "timestamp": "2024-01-01T12:00:00.000Z"
+}
+```
 
 ## Docker
 
@@ -169,12 +252,19 @@ docker run -p 8080:8080 --network websocket-network web-socket-server
 - `PORT`: Server port (default: 8080)
 - `REDIS_HOST`: Redis host (default: localhost)
 - `REDIS_PORT`: Redis port (default: 6379)
-- `SERVER_URL`: Server URL for client to fetch WebSocket endpoint (default: http://localhost:8080)
+- `DEBUG`: Enable debug logging (set to `true` or `1` to enable)
 
 ### Client
 
 - `CLIENT_NAME`: Client ID/name to use when connecting (if not provided, uses random UUID)
+- `FRIENDS`: Comma-separated list of friend names to subscribe to (automatically prefixed with "topic-")
 - `SERVER_URL`: Server URL to connect to (default: http://localhost:8080)
+- `DEBUG`: Enable debug logging (set to `true` or `1` to enable)
+
+**Example:**
+```bash
+CLIENT_NAME=Alice FRIENDS=Bob,Charlie DEBUG=true npm run client
+```
 
 ## License
 

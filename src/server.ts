@@ -6,6 +6,18 @@ const PORT = process.env.PORT || 8080;
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
 
+// Get debug flag from environment variable (DEBUG)
+// Usage: DEBUG=true npm run dev
+// Or: DEBUG=1 npm start
+const DEBUG = process.env.DEBUG === 'true' || process.env.DEBUG === '1';
+
+// Debug logging function
+function debugLog(...args: any[]): void {
+  if (DEBUG) {
+    console.log(...args);
+  }
+}
+
 // Create Redis client for PUB/SUB
 const redis = new Redis({
   host: REDIS_HOST,
@@ -17,15 +29,15 @@ const redis = new Redis({
 });
 
 redis.on('connect', () => {
-  console.log('✅ Connected to Redis');
+  debugLog('✅ Connected to Redis');
 });
 
 redis.on('error', (error: Error) => {
-  console.error('❌ Redis connection error:', error);
+  debugLog('❌ Redis connection error:', error);
 });
 
 redis.on('close', () => {
-  console.log('🔌 Redis connection closed');
+  debugLog('🔌 Redis connection closed');
 });
 
 // Create HTTP server
@@ -109,15 +121,15 @@ wss.on('connection', (ws: WebSocket, req) => {
           data: parsedMessage,
           timestamp: new Date().toISOString()
         }));
-        console.log(`📥 Forwarded message from topic ${topic} to client ${clientId}`);
+        debugLog(`📥 Forwarded message from topic ${topic} to client ${clientId}`);
       } catch (error) {
-        console.error(`Error parsing message from topic ${topic} for client ${clientId}:`, error);
+        debugLog(`Error parsing message from topic ${topic} for client ${clientId}:`, error);
       }
     }
   });
   
   redisSubscriber.on('error', (error: Error) => {
-    console.error(`Redis subscriber error for client ${clientId}:`, error);
+    debugLog(`Redis subscriber error for client ${clientId}:`, error);
   });
   
   // Subscribe to initial topics if provided
@@ -125,11 +137,11 @@ wss.on('connection', (ws: WebSocket, req) => {
     initialTopics.forEach(topic => {
       clientWs.subscribedTopics!.add(topic);
       redisSubscriber.subscribe(topic);
-      console.log(`📡 Client ${clientId} subscribed to topic: ${topic}`);
+      debugLog(`📡 Client ${clientId} subscribed to topic: ${topic}`);
     });
   }
   
-  console.log(`New client connected - ID: ${clientId}, IP: ${clientIp}, Redis Topic: ${redisTopic}, Subscribed Topics: ${initialTopics.join(', ') || 'none'}`);
+  debugLog(`New client connected - ID: ${clientId}, IP: ${clientIp}, Redis Topic: ${redisTopic}, Subscribed Topics: ${initialTopics.join(', ') || 'none'}`);
   
   // Add client to set
   clients.add(ws);
@@ -153,7 +165,7 @@ wss.on('connection', (ws: WebSocket, req) => {
     try {
       message = JSON.parse(data.toString());
     } catch (parseError) {
-      console.error(`Error parsing JSON from client ${clientWs.clientId}:`, parseError);
+      debugLog(`Error parsing JSON from client ${clientWs.clientId}:`, parseError);
       ws.send(JSON.stringify({
         type: 'error',
         message: 'Invalid JSON format',
@@ -164,6 +176,7 @@ wss.on('connection', (ws: WebSocket, req) => {
 
     // Process the message
     try {
+      // Keep message content as regular log (not debug)
       console.log(`Received message from client ${clientWs.clientId} (IP: ${clientWs.clientIp}):`, message);
 
       // Handle subscription/unsubscription requests
@@ -176,7 +189,7 @@ wss.on('connection', (ws: WebSocket, req) => {
             clientWs.subscribedTopics?.add(topic);
             clientWs.redisSubscriber?.subscribe(topic);
             newTopics.push(topic);
-            console.log(`📡 Client ${clientWs.clientId} subscribed to topic: ${topic}`);
+            debugLog(`📡 Client ${clientWs.clientId} subscribed to topic: ${topic}`);
           }
         });
         
@@ -198,7 +211,7 @@ wss.on('connection', (ws: WebSocket, req) => {
             clientWs.subscribedTopics.delete(topic);
             clientWs.redisSubscriber?.unsubscribe(topic);
             removedTopics.push(topic);
-            console.log(`📡 Client ${clientWs.clientId} unsubscribed from topic: ${topic}`);
+            debugLog(`📡 Client ${clientWs.clientId} unsubscribed from topic: ${topic}`);
           }
         });
         
@@ -222,14 +235,14 @@ wss.on('connection', (ws: WebSocket, req) => {
           });
           
           await redis.publish(clientWs.redisTopic, redisMessage);
-          console.log(`📤 Published message to Redis topic: ${clientWs.redisTopic}`);
+          debugLog(`📤 Published message to Redis topic: ${clientWs.redisTopic}`);
         } catch (redisError) {
-          console.error(`Redis publish error for client ${clientWs.clientId}:`, redisError);
+          debugLog(`Redis publish error for client ${clientWs.clientId}:`, redisError);
           // Continue processing even if Redis fails - don't block the client
         }
       }
     } catch (error) {
-      console.error(`Error processing message from client ${clientWs.clientId}:`, error);
+      debugLog(`Error processing message from client ${clientWs.clientId}:`, error);
       ws.send(JSON.stringify({
         type: 'error',
         message: 'Error processing message',
@@ -241,7 +254,7 @@ wss.on('connection', (ws: WebSocket, req) => {
   // Handle client disconnect
   ws.on('close', () => {
     const clientWs = ws as ClientWebSocket;
-    console.log(`Client ${clientWs.clientId} (IP: ${clientWs.clientIp}, Redis Topic: ${clientWs.redisTopic}) disconnected`);
+    debugLog(`Client ${clientWs.clientId} (IP: ${clientWs.clientIp}, Redis Topic: ${clientWs.redisTopic}) disconnected`);
     
     // Clean up Redis subscriber
     if (clientWs.redisSubscriber) {
@@ -254,7 +267,7 @@ wss.on('connection', (ws: WebSocket, req) => {
   // Handle errors
   ws.on('error', (error) => {
     const clientWs = ws as ClientWebSocket;
-    console.error(`WebSocket error for client ${clientWs.clientId} (IP: ${clientWs.clientIp}):`, error);
+    debugLog(`WebSocket error for client ${clientWs.clientId} (IP: ${clientWs.clientIp}):`, error);
     
     // Clean up Redis subscriber
     if (clientWs.redisSubscriber) {
@@ -351,19 +364,19 @@ server.on('request', (req, res) => {
 
 // Start server
 server.listen(PORT, () => {
-  console.log(`WebSocket server is running on ws://localhost:${PORT}/ws`);
-  console.log(`HTTP server is running on http://localhost:${PORT}`);
-  console.log(`WebSocket info endpoint: http://localhost:${PORT}/api/websocket`);
-  console.log(`Connected clients endpoint: http://localhost:${PORT}/api/clients`);
+  debugLog(`WebSocket server is running on ws://localhost:${PORT}/ws`);
+  debugLog(`HTTP server is running on http://localhost:${PORT}`);
+  debugLog(`WebSocket info endpoint: http://localhost:${PORT}/api/websocket`);
+  debugLog(`Connected clients endpoint: http://localhost:${PORT}/api/clients`);
 });
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('\nShutting down server...');
+  debugLog('\nShutting down server...');
   wss.close(() => {
     server.close(() => {
       redis.quit(() => {
-        console.log('Server and Redis closed');
+        debugLog('Server and Redis closed');
         process.exit(0);
       });
     });
