@@ -6,7 +6,6 @@ A WebSocket server built with Node.js and TypeScript.
 
 - WebSocket server using the `ws` library
 - TypeScript support
-- Message broadcasting
 - Client connection management
 - Redis PUB/SUB integration
 - Graceful shutdown handling
@@ -43,6 +42,45 @@ npm run watch
 
 The server runs on `ws://localhost:8080/ws` by default.
 
+### Running the Client
+
+The project includes a client application that connects to the WebSocket server. You can run it with:
+
+```bash
+npm run client
+```
+
+#### Client ID
+
+You can specify a custom client ID (name) when running the client. This is useful when running multiple client instances:
+
+**Using command line argument:**
+```bash
+npm run client -- --name Alice
+npm run client -- --name Bob
+npm run client -- --name Charlie
+```
+
+**Using environment variable:**
+```bash
+CLIENT_NAME=Alice npm run client
+CLIENT_NAME=Bob npm run client
+```
+
+If no name is provided, the client will use a random UUID as the client ID.
+
+**Example: Running multiple client instances:**
+```bash
+# Terminal 1
+npm run client -- --name Alice
+
+# Terminal 2
+npm run client -- --name Bob
+
+# Terminal 3
+npm run client -- --name Charlie
+```
+
 ### Connecting with a WebSocket Client
 
 You can test the server using any WebSocket client. Here's an example using Node.js:
@@ -56,8 +94,7 @@ ws.on('open', () => {
   
   // Send a message
   ws.send(JSON.stringify({
-    text: 'Hello, server!',
-    broadcast: false
+    text: 'Hello, server!'
   }));
 });
 
@@ -76,13 +113,11 @@ Send messages as JSON:
 
 ```json
 {
-  "text": "Your message here",
-  "broadcast": true
+  "text": "Your message here"
 }
 ```
 
 - `text`: The message content
-- `broadcast`: If `true`, the message will be sent to all connected clients
 
 ### Server Responses
 
@@ -90,7 +125,6 @@ The server sends different message types:
 
 - `welcome`: Sent when a client connects
 - `echo`: Echo of your message
-- `broadcast`: Messages from other clients (when broadcast is enabled)
 - `error`: Error messages
 
 ## Docker
@@ -130,9 +164,17 @@ docker run -p 8080:8080 --network websocket-network web-socket-server
 
 ## Environment Variables
 
+### Server
+
 - `PORT`: Server port (default: 8080)
 - `REDIS_HOST`: Redis host (default: localhost)
 - `REDIS_PORT`: Redis port (default: 6379)
+- `SERVER_URL`: Server URL for client to fetch WebSocket endpoint (default: http://localhost:8080)
+
+### Client
+
+- `CLIENT_NAME`: Client ID/name to use when connecting (if not provided, uses random UUID)
+- `SERVER_URL`: Server URL to connect to (default: http://localhost:8080)
 
 ## License
 
