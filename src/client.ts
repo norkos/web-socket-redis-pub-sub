@@ -58,19 +58,19 @@ async function connectToWebSocket() {
       const interval = setInterval(() => {
         if (ws.readyState === WebSocket.OPEN) {
           const message = {
-            text: `Broadcast message from client ${CLIENT_ID}`,
-            broadcast: true,
+            text: `Sending geolocation from client ${CLIENT_ID}`,
+            broadcast: false,
             clientId: CLIENT_ID,
             timestamp: new Date().toISOString()
           };
           
           ws.send(JSON.stringify(message));
-          console.log(`📤 Sent broadcast message: ${message.text}`);
+          console.log(`📤 Sent message: ${message.text}`);
         } else {
           console.log('⚠️  WebSocket not open, clearing interval');
           clearInterval(interval);
         }
-      }, 10000); // 10 seconds
+      }, 20000); // 20 seconds
 
       // Clean up interval on close
       ws.on('close', () => {

@@ -1,7 +1,32 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';
+import Redis from 'ioredis';
 
 const PORT = process.env.PORT || 8080;
+const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
+const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
+
+// Create Redis client for PUB/SUB
+const redis = new Redis({
+  host: REDIS_HOST,
+  port: REDIS_PORT,
+  retryStrategy: (times: number) => {
+    const delay = Math.min(times * 50, 2000);
+    return delay;
+  }
+});
+
+redis.on('connect', () => {
+  console.log('✅ Connected to Redis');
+});
+
+redis.on('error', (error: Error) => {
+  console.error('❌ Redis connection error:', error);
+});
+
+redis.on('close', () => {
+  console.log('🔌 Redis connection closed');
+});
 
 // Create HTTP server
 const server = createServer();
@@ -23,6 +48,7 @@ const ipClientCounts = new Map<string, number>();
 interface ClientWebSocket extends WebSocket {
   clientId?: string;
   clientIp?: string;
+  redisTopic?: string;
 }
 
 wss.on('connection', (ws: WebSocket, req) => {
@@ -36,11 +62,16 @@ wss.on('connection', (ws: WebSocket, req) => {
   // Create human-readable client ID: IP-1, IP-2, etc.
   const clientId = `${clientIp}-${nextCount}`;
   
-  // Store client metadata on the WebSocket object
-  (ws as ClientWebSocket).clientId = clientId;
-  (ws as ClientWebSocket).clientIp = clientIp;
+  // Create Redis PUB/SUB topic for this client
+  const redisTopic = `client:${clientId}`;
   
-  console.log(`New client connected - ID: ${clientId}, IP: ${clientIp}`);
+  // Store client metadata on the WebSocket object
+  const clientWs = ws as ClientWebSocket;
+  clientWs.clientId = clientId;
+  clientWs.clientIp = clientIp;
+  clientWs.redisTopic = redisTopic;
+  
+  console.log(`New client connected - ID: ${clientId}, IP: ${clientIp}, Redis Topic: ${redisTopic}`);
   
   // Add client to set
   clients.add(ws);
@@ -50,15 +81,29 @@ wss.on('connection', (ws: WebSocket, req) => {
     type: 'welcome',
     message: 'Connected to WebSocket server',
     clientId: clientId,
+    redisTopic: redisTopic,
     timestamp: new Date().toISOString()
   }));
 
   // Handle incoming messages
-  ws.on('message', (data: Buffer) => {
+  ws.on('message', async (data: Buffer) => {
     try {
       const message = JSON.parse(data.toString());
       const clientWs = ws as ClientWebSocket;
       console.log(`Received message from client ${clientWs.clientId} (IP: ${clientWs.clientIp}):`, message);
+
+      // Publish message to Redis topic for this client
+      if (clientWs.redisTopic) {
+        const redisMessage = JSON.stringify({
+          clientId: clientWs.clientId,
+          clientIp: clientWs.clientIp,
+          message: message,
+          timestamp: new Date().toISOString()
+        });
+        
+        await redis.publish(clientWs.redisTopic, redisMessage);
+        console.log(`📤 Published message to Redis topic: ${clientWs.redisTopic}`);
+      }
 
       // Echo message back to sender
       ws.send(JSON.stringify({
@@ -97,7 +142,7 @@ wss.on('connection', (ws: WebSocket, req) => {
   // Handle client disconnect
   ws.on('close', () => {
     const clientWs = ws as ClientWebSocket;
-    console.log(`Client ${clientWs.clientId} (IP: ${clientWs.clientIp}) disconnected`);
+    console.log(`Client ${clientWs.clientId} (IP: ${clientWs.clientIp}, Redis Topic: ${clientWs.redisTopic}) disconnected`);
     clients.delete(ws);
   });
 
@@ -133,13 +178,7 @@ server.on('request', (req, res) => {
           'Connect to the WebSocket URL using any WebSocket client',
           'Send messages as JSON format: { "text": "your message", "broadcast": false }',
           'Set broadcast: true to send message to all connected clients'
-        ],
-        example: {
-          javascript: `const ws = new WebSocket('${websocketUrl}');
-ws.onopen = () => console.log('Connected');
-ws.onmessage = (event) => console.log('Received:', JSON.parse(event.data));
-ws.send(JSON.stringify({ text: 'Hello', broadcast: false }));`
-        }
+        ]
       },
       server: {
         status: 'running',
@@ -170,8 +209,10 @@ process.on('SIGINT', () => {
   console.log('\nShutting down server...');
   wss.close(() => {
     server.close(() => {
-      console.log('Server closed');
-      process.exit(0);
+      redis.quit(() => {
+        console.log('Server and Redis closed');
+        process.exit(0);
+      });
     });
   });
 });

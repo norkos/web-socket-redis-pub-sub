@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: web-socket-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - websocket-network
+
+  # Optional: Uncomment to run the server in Docker as well
+  # server:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: web-socket-server
+  #   ports:
+  #     - "8080:8080"
+  #   environment:
+  #     - PORT=8080
+  #     - REDIS_HOST=redis
+  #     - REDIS_PORT=6379
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
+  #   networks:
+  #     - websocket-network
+
+volumes:
+  redis-data:
+
+networks:
+  websocket-network:
+    driver: bridge
+

@@ -1,0 +1,16 @@
+node_modules
+dist
+.git
+.gitignore
+*.md
+.env
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.vscode
+.idea
+coverage
+*.tsbuildinfo
+
