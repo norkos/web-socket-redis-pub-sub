@@ -4,51 +4,34 @@ import { get } from 'http';
 
 const SERVER_URL = process.env.SERVER_URL || 'http://localhost:8080';
 
-// Get CLIENT_ID from command line argument (--name) or environment variable (CLIENT_NAME)
-// Usage: npm run client -- --name Alice
-// Or: CLIENT_NAME=Alice npm run client
-// If not provided, falls back to random UUID
 function getClientId(): string {
-  // Check command line arguments for --name
   const args = process.argv.slice(2);
   const nameIndex = args.indexOf('--name');
   if (nameIndex !== -1 && args[nameIndex + 1]) {
     return args[nameIndex + 1];
   }
   
-  // Check environment variable
   if (process.env.CLIENT_NAME) {
     return process.env.CLIENT_NAME;
   }
   
-  // Fall back to random UUID if no name provided
   return randomUUID();
 }
 
-// Get friends from command line argument (--friend) or environment variable (FRIENDS)
-// Usage: npm run client -- --name Alice --friend Bob,Charlie
-// Or: FRIENDS=Bob,Charlie npm run client
-// Friend names are automatically prefixed with "topic-" to create topic names
-function getTopics(): string[] {
+function getObseredTopics(): string[] {
   const args = process.argv.slice(2);
   let friends: string[] = [];
   
-  // Check command line arguments for --friend
   const friendIndex = args.indexOf('--friend');
   if (friendIndex !== -1 && args[friendIndex + 1]) {
     friends = args[friendIndex + 1].split(',').map(f => f.trim()).filter(f => f);
   } else if (process.env.FRIENDS) {
-    // Check environment variable
     friends = process.env.FRIENDS.split(',').map(f => f.trim()).filter(f => f);
   }
   
-  // Add "topic-" prefix to each friend name
   return friends.map(friend => `topic-${friend}`);
 }
 
-// Get debug flag from command line argument (--debug) or environment variable (DEBUG)
-// Usage: npm run client -- --debug
-// Or: DEBUG=true npm run client
 function getDebugFlag(): boolean {
   const args = process.argv.slice(2);
   if (args.includes('--debug')) {
@@ -59,7 +42,6 @@ function getDebugFlag(): boolean {
 
 const DEBUG = getDebugFlag();
 
-// Debug logging function
 function debugLog(...args: any[]): void {
   if (DEBUG) {
     console.log(...args);
@@ -67,9 +49,8 @@ function debugLog(...args: any[]): void {
 }
 
 const CLIENT_ID = getClientId();
-const INITIAL_TOPICS = getTopics();
+const INITIAL_TOPICS = getObseredTopics();
 
-// Function to fetch WebSocket URL from server
 function fetchWebSocketUrl(clientId: string, topics: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
     const url = new URL('/api/websocket', SERVER_URL);
@@ -108,7 +89,82 @@ function fetchWebSocketUrl(clientId: string, topics: string[]): Promise<string> 
   });
 }
 
-// Main function to connect to WebSocket
+function setupPeriodicGeolocationUpdates(ws: WebSocket, clientId: string): NodeJS.Timeout {
+  return setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      const message = {
+        text: ` ${clientId} updating geolocation`,
+        clientId: clientId,
+        timestamp: new Date().toISOString()
+      };
+      
+      ws.send(JSON.stringify(message));
+      console.log(`📤 Sent message: ${message.text}`);
+    } else {
+      debugLog('⚠️  WebSocket not open, clearing interval');
+    }
+  }, 20000); // 20 seconds
+}
+
+function handleIncomingWebSocketMessage(data: Buffer): void {
+  try {
+    const message = JSON.parse(data.toString());
+    
+    switch (message.type) {
+      case 'topic-message':
+        console.log(`📥 Received message from topic "${message.topic}":`, message.data);
+        break;
+      
+      case 'welcome':
+        debugLog('📥 Welcome message:', message);
+        if (message.subscribedTopics && message.subscribedTopics.length > 0) {
+          debugLog(`✅ Subscribed to topics: ${message.subscribedTopics.join(', ')}`);
+        }
+        break;
+      
+      case 'subscribed':
+        debugLog(`✅ Subscribed to topics: ${message.topics.join(', ')}`);
+        debugLog(`📋 All subscribed topics: ${message.allSubscribedTopics.join(', ')}`);
+        break;
+      
+      case 'unsubscribed':
+        debugLog(`❌ Unsubscribed from topics: ${message.topics.join(', ')}`);
+        debugLog(`📋 All subscribed topics: ${message.allSubscribedTopics.join(', ')}`);
+        break;
+      
+      default:
+        console.log('📥 Received:', message);
+        break;
+    }
+  } catch (error) {
+    console.error('Error parsing message:', error);
+  }
+}
+
+function setupWebSocketEventHandlers(ws: WebSocket, clientId: string, interval: NodeJS.Timeout): void {
+  ws.on('message', (data: Buffer) => {
+    handleIncomingWebSocketMessage(data);
+  });
+
+  ws.on('error', (error) => {
+    debugLog('❌ WebSocket error:', error);
+  });
+
+  ws.on('close', (code, reason) => {
+    clearInterval(interval);
+    debugLog('Interval cleared');
+    debugLog(`🔌 Connection closed. Code: ${code}, Reason: ${reason.toString()}`);
+    process.exit(0);
+  });
+
+  process.on('SIGINT', () => {
+    debugLog('\n🛑 Shutting down client...');
+    clearInterval(interval);
+    ws.close();
+    process.exit(0);
+  });
+}
+
 async function connectToWebSocket() {
   try {
     const WEBSOCKET_URL = await fetchWebSocketUrl(CLIENT_ID, INITIAL_TOPICS);
@@ -118,84 +174,13 @@ async function connectToWebSocket() {
     }
     debugLog(`🔌 Connecting to ${WEBSOCKET_URL}...`);
     
-    // Create WebSocket connection
     const ws = new WebSocket(WEBSOCKET_URL);
 
-    // Connection opened
     ws.on('open', () => {
       debugLog('✅ Connected to WebSocket server');
       
-      // If topics weren't provided in URL, subscribe via message (if needed)
-      // The server already handles topics from URL query params
-      
-      // Start sending messages every 20 seconds
-      const interval = setInterval(() => {
-        if (ws.readyState === WebSocket.OPEN) {
-          const message = {
-            text: ` ${CLIENT_ID} updating geolocation`,
-            clientId: CLIENT_ID,
-            timestamp: new Date().toISOString()
-          };
-          
-          ws.send(JSON.stringify(message));
-          console.log(`📤 Sent message: ${message.text}`);
-        } else {
-          debugLog('⚠️  WebSocket not open, clearing interval');
-          clearInterval(interval);
-        }
-      }, 20000); // 20 seconds
-
-      // Clean up interval on close
-      ws.on('close', () => {
-        clearInterval(interval);
-        debugLog('Interval cleared');
-      });
-    });
-
-    // Handle incoming messages
-    ws.on('message', (data: Buffer) => {
-      try {
-        const message = JSON.parse(data.toString());
-        
-        if (message.type === 'topic-message') {
-          // Keep message content as regular log (not debug)
-          console.log(`📥 Received message from topic "${message.topic}":`, message.data);
-        } else if (message.type === 'welcome') {
-          debugLog('📥 Welcome message:', message);
-          if (message.subscribedTopics && message.subscribedTopics.length > 0) {
-            debugLog(`✅ Subscribed to topics: ${message.subscribedTopics.join(', ')}`);
-          }
-        } else if (message.type === 'subscribed') {
-          debugLog(`✅ Subscribed to topics: ${message.topics.join(', ')}`);
-          debugLog(`📋 All subscribed topics: ${message.allSubscribedTopics.join(', ')}`);
-        } else if (message.type === 'unsubscribed') {
-          debugLog(`❌ Unsubscribed from topics: ${message.topics.join(', ')}`);
-          debugLog(`📋 All subscribed topics: ${message.allSubscribedTopics.join(', ')}`);
-        } else {
-          // Keep message content as regular log (not debug)
-          console.log('📥 Received:', message);
-        }
-      } catch (error) {
-        console.error('Error parsing message:', error);
-      }
-    });
-
-    // Handle errors
-    ws.on('error', (error) => {
-      debugLog('❌ WebSocket error:', error);
-    });
-
-    // Handle connection close
-    ws.on('close', (code, reason) => {
-      debugLog(`🔌 Connection closed. Code: ${code}, Reason: ${reason.toString()}`);
-      process.exit(0);
-    });
-
-    // Graceful shutdown
-    process.on('SIGINT', () => {
-      debugLog('\n🛑 Shutting down client...');
-      ws.close();
-      process.exit(0);
+      const interval = setupPeriodicGeolocationUpdates(ws, CLIENT_ID);
+      setupWebSocketEventHandlers(ws, CLIENT_ID, interval);
     });
     
   } catch (error) {
@@ -204,6 +189,5 @@ async function connectToWebSocket() {
   }
 }
 
-// Start the client
 connectToWebSocket();
 

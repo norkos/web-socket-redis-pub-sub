@@ -7,3 +7,6 @@ EXPOSE 6379
 # You can customize by mounting a custom redis.conf file
 CMD ["redis-server"]
 
+
+
+

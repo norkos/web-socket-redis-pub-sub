@@ -6,39 +6,45 @@ const PORT = process.env.PORT || 8080;
 const REDIS_HOST = process.env.REDIS_HOST || 'localhost';
 const REDIS_PORT = parseInt(process.env.REDIS_PORT || '6379', 10);
 
-// Get debug flag from environment variable (DEBUG)
-// Usage: DEBUG=true npm run dev
-// Or: DEBUG=1 npm start
 const DEBUG = process.env.DEBUG === 'true' || process.env.DEBUG === '1';
 
-// Debug logging function
 function debugLog(...args: any[]): void {
   if (DEBUG) {
     console.log(...args);
   }
 }
 
-// Create Redis client for PUB/SUB
-const redis = new Redis({
-  host: REDIS_HOST,
-  port: REDIS_PORT,
-  retryStrategy: (times: number) => {
+function createRedisRetryStrategy() {
+  return (times: number) => {
     const delay = Math.min(times * 50, 2000);
     return delay;
-  }
-});
+  };
+}
 
-redis.on('connect', () => {
-  debugLog('✅ Connected to Redis');
-});
+function createRedisClient(): Redis {
+  return new Redis({
+    host: REDIS_HOST,
+    port: REDIS_PORT,
+    retryStrategy: createRedisRetryStrategy()
+  });
+}
 
-redis.on('error', (error: Error) => {
-  debugLog('❌ Redis connection error:', error);
-});
+function setupRedisEventHandlers(redis: Redis): void {
+  redis.on('connect', () => {
+    debugLog('✅ Connected to Redis');
+  });
 
-redis.on('close', () => {
-  debugLog('🔌 Redis connection closed');
-});
+  redis.on('error', (error: Error) => {
+    debugLog('❌ Redis connection error:', error);
+  });
+
+  redis.on('close', () => {
+    debugLog('🔌 Redis connection closed');
+  });
+}
+
+const redis = createRedisClient();
+setupRedisEventHandlers(redis);
 
 // Create HTTP server
 const server = createServer();
@@ -65,52 +71,44 @@ interface ClientWebSocket extends WebSocket {
   redisSubscriber?: Redis;
 }
 
-wss.on('connection', (ws: WebSocket, req) => {
-  const clientIp = req.socket.remoteAddress || 'unknown';
-  
-  // Extract clientId from WebSocket URL query parameters
-  let clientId: string;
-  const url = new URL(req.url || '/ws', `http://${req.headers.host}`);
+function generateClientIdFromQueryOrIp(url: URL, clientIp: string): string {
   const clientIdParam = url.searchParams.get('clientId');
   
   if (clientIdParam) {
-    // Use the clientId provided by the client
-    clientId = clientIdParam;
-  } else {
-    // Fallback: Generate client ID based on IP and counter
-    const currentCount = ipClientCounts.get(clientIp) || 0;
-    const nextCount = currentCount + 1;
-    ipClientCounts.set(clientIp, nextCount);
-    clientId = `${clientIp}-${nextCount}`;
+    return clientIdParam;
   }
   
-  // Create Redis PUB/SUB topic for this client
-  const redisTopic = `topic-${clientId}`;
-  
-  // Extract topics from query parameters (comma-separated)
+  const currentCount = ipClientCounts.get(clientIp) || 0;
+  const nextCount = currentCount + 1;
+  ipClientCounts.set(clientIp, nextCount);
+  return `${clientIp}-${nextCount}`;
+}
+
+function extractTopicsFromQueryParams(url: URL): string[] {
   const topicsParam = url.searchParams.get('topics');
-  const initialTopics = topicsParam ? topicsParam.split(',').map(t => t.trim()).filter(t => t) : [];
-  
-  // Store client metadata on the WebSocket object
+  return topicsParam ? topicsParam.split(',').map(t => t.trim()).filter(t => t) : [];
+}
+
+function initializeClientMetadata(
+  ws: WebSocket,
+  clientId: string,
+  clientIp: string,
+  redisTopic: string
+): ClientWebSocket {
   const clientWs = ws as ClientWebSocket;
   clientWs.clientId = clientId;
   clientWs.clientIp = clientIp;
   clientWs.redisTopic = redisTopic;
   clientWs.subscribedTopics = new Set<string>();
-  
-  // Create a Redis subscriber for this client
-  const redisSubscriber = new Redis({
-    host: REDIS_HOST,
-    port: REDIS_PORT,
-    retryStrategy: (times: number) => {
-      const delay = Math.min(times * 50, 2000);
-      return delay;
-    }
-  });
-  
-  clientWs.redisSubscriber = redisSubscriber;
-  
-  // Subscribe to Redis messages and forward to WebSocket client
+  return clientWs;
+}
+
+function forwardRedisMessageToWebSocket(
+  redisSubscriber: Redis,
+  clientWs: ClientWebSocket,
+  ws: WebSocket,
+  clientId: string
+): void {
   redisSubscriber.on('message', (topic: string, message: string) => {
     if (clientWs.subscribedTopics?.has(topic) && ws.readyState === WebSocket.OPEN) {
       try {
@@ -127,251 +125,318 @@ wss.on('connection', (ws: WebSocket, req) => {
       }
     }
   });
-  
+
   redisSubscriber.on('error', (error: Error) => {
     debugLog(`Redis subscriber error for client ${clientId}:`, error);
   });
-  
-  // Subscribe to initial topics if provided
-  if (initialTopics.length > 0) {
-    initialTopics.forEach(topic => {
+}
+
+function subscribeToInitialTopics(
+  redisSubscriber: Redis,
+  clientWs: ClientWebSocket,
+  topics: string[],
+  clientId: string
+): void {
+  if (topics.length > 0) {
+    topics.forEach(topic => {
       clientWs.subscribedTopics!.add(topic);
       redisSubscriber.subscribe(topic);
       debugLog(`📡 Client ${clientId} subscribed to topic: ${topic}`);
     });
   }
-  
-  debugLog(`New client connected - ID: ${clientId}, IP: ${clientIp}, Redis Topic: ${redisTopic}, Subscribed Topics: ${initialTopics.join(', ') || 'none'}`);
-  
-  // Add client to set
-  clients.add(ws);
-  
-  // Send welcome message
+}
+
+function sendWelcomeMessageToClient(
+  ws: WebSocket,
+  clientWs: ClientWebSocket,
+  clientId: string,
+  redisTopic: string
+): void {
   ws.send(JSON.stringify({
     type: 'welcome',
     message: 'Connected to WebSocket server',
     clientId: clientId,
     redisTopic: redisTopic,
-    subscribedTopics: Array.from(clientWs.subscribedTopics),
+    subscribedTopics: Array.from(clientWs.subscribedTopics || []),
     timestamp: new Date().toISOString()
   }));
+}
 
-  // Handle incoming messages
+wss.on('connection', (ws: WebSocket, req) => {
+  const clientIp = req.socket.remoteAddress || 'unknown';
+  const url = new URL(req.url || '/ws', `http://${req.headers.host}`);
+  const clientId = generateClientIdFromQueryOrIp(url, clientIp);
+  const redisTopic = `topic-${clientId}`;
+  const initialTopics = extractTopicsFromQueryParams(url);
+  
+  const clientWs = initializeClientMetadata(ws, clientId, clientIp, redisTopic);
+  const redisSubscriber = createRedisClient();
+  clientWs.redisSubscriber = redisSubscriber;
+  
+  forwardRedisMessageToWebSocket(redisSubscriber, clientWs, ws, clientId);
+  subscribeToInitialTopics(redisSubscriber, clientWs, initialTopics, clientId);
+  
+  debugLog(`New client connected - ID: ${clientId}, IP: ${clientIp}, Redis Topic: ${redisTopic}, Subscribed Topics: ${initialTopics.join(', ') || 'none'}`);
+  
+  clients.add(ws);
+  sendWelcomeMessageToClient(ws, clientWs, clientId, redisTopic);
+
   ws.on('message', async (data: Buffer) => {
     const clientWs = ws as ClientWebSocket;
-    let message: any;
+    const message = parseIncomingMessage(data, clientWs.clientId || 'unknown');
 
-    // Parse JSON first - this is the most likely source of errors
-    try {
-      message = JSON.parse(data.toString());
-    } catch (parseError) {
-      debugLog(`Error parsing JSON from client ${clientWs.clientId}:`, parseError);
-      ws.send(JSON.stringify({
-        type: 'error',
-        message: 'Invalid JSON format',
-        timestamp: new Date().toISOString()
-      }));
+    if (message === null) {
+      sendErrorMessage(ws, 'Invalid JSON format');
       return;
     }
 
-    // Process the message
-    try {
-      // Keep message content as regular log (not debug)
-      console.log(`Received message from client ${clientWs.clientId} (IP: ${clientWs.clientIp}):`, message);
-
-      // Handle subscription/unsubscription requests
-      if (message.type === 'subscribe' && Array.isArray(message.topics)) {
-        const topicsToSubscribe = message.topics.filter((topic: string) => typeof topic === 'string' && topic.trim());
-        const newTopics: string[] = [];
-        
-        topicsToSubscribe.forEach((topic: string) => {
-          if (!clientWs.subscribedTopics?.has(topic)) {
-            clientWs.subscribedTopics?.add(topic);
-            clientWs.redisSubscriber?.subscribe(topic);
-            newTopics.push(topic);
-            debugLog(`📡 Client ${clientWs.clientId} subscribed to topic: ${topic}`);
-          }
-        });
-        
-        ws.send(JSON.stringify({
-          type: 'subscribed',
-          topics: newTopics,
-          allSubscribedTopics: Array.from(clientWs.subscribedTopics || []),
-          timestamp: new Date().toISOString()
-        }));
-        return;
-      }
-      
-      if (message.type === 'unsubscribe' && Array.isArray(message.topics)) {
-        const topicsToUnsubscribe = message.topics.filter((topic: string) => typeof topic === 'string' && topic.trim());
-        const removedTopics: string[] = [];
-        
-        topicsToUnsubscribe.forEach((topic: string) => {
-          if (clientWs.subscribedTopics?.has(topic)) {
-            clientWs.subscribedTopics.delete(topic);
-            clientWs.redisSubscriber?.unsubscribe(topic);
-            removedTopics.push(topic);
-            debugLog(`📡 Client ${clientWs.clientId} unsubscribed from topic: ${topic}`);
-          }
-        });
-        
-        ws.send(JSON.stringify({
-          type: 'unsubscribed',
-          topics: removedTopics,
-          allSubscribedTopics: Array.from(clientWs.subscribedTopics || []),
-          timestamp: new Date().toISOString()
-        }));
-        return;
-      }
-
-      // Publish message to Redis topic for this client
-      if (clientWs.redisTopic) {
-        try {
-          const redisMessage = JSON.stringify({
-            clientId: clientWs.clientId,
-            clientIp: clientWs.clientIp,
-            message: message,
-            timestamp: new Date().toISOString()
-          });
-          
-          await redis.publish(clientWs.redisTopic, redisMessage);
-          debugLog(`📤 Published message to Redis topic: ${clientWs.redisTopic}`);
-        } catch (redisError) {
-          debugLog(`Redis publish error for client ${clientWs.clientId}:`, redisError);
-          // Continue processing even if Redis fails - don't block the client
-        }
-      }
-    } catch (error) {
-      debugLog(`Error processing message from client ${clientWs.clientId}:`, error);
-      ws.send(JSON.stringify({
-        type: 'error',
-        message: 'Error processing message',
-        timestamp: new Date().toISOString()
-      }));
-    }
+    await processIncomingMessage(ws, clientWs, message, redis);
   });
 
-  // Handle client disconnect
   ws.on('close', () => {
     const clientWs = ws as ClientWebSocket;
-    debugLog(`Client ${clientWs.clientId} (IP: ${clientWs.clientIp}, Redis Topic: ${clientWs.redisTopic}) disconnected`);
-    
-    // Clean up Redis subscriber
-    if (clientWs.redisSubscriber) {
-      clientWs.redisSubscriber.quit();
-    }
-    
-    clients.delete(ws);
+    cleanupClientResources(clientWs, ws);
   });
 
-  // Handle errors
   ws.on('error', (error) => {
     const clientWs = ws as ClientWebSocket;
     debugLog(`WebSocket error for client ${clientWs.clientId} (IP: ${clientWs.clientIp}):`, error);
-    
-    // Clean up Redis subscriber
-    if (clientWs.redisSubscriber) {
-      clientWs.redisSubscriber.quit();
-    }
-    
-    clients.delete(ws);
+    cleanupClientResources(clientWs, ws);
   });
 });
 
-// REST GET endpoint to get WebSocket connection information
-server.on('request', (req, res) => {
-  // GET endpoint for WebSocket information
-  if (req.method === 'GET' && req.url?.startsWith('/api/websocket')) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const clientId = url.searchParams.get('clientId');
-    const topics = url.searchParams.get('topics');
-    
-    const host = req.headers.host || `localhost:${PORT}`;
-    // Determine protocol: check for forwarded proto header (from proxy/load balancer)
-    // or default to ws (wss would be used if behind HTTPS proxy)
-    const forwardedProto = req.headers['x-forwarded-proto'];
-    const protocol = forwardedProto === 'https' ? 'wss' : 'ws';
-    
-    // Include clientId and topics in WebSocket URL if provided
-    let websocketUrl = `${protocol}://${host}/ws`;
-    const params = new URLSearchParams();
-    if (clientId) {
-      params.set('clientId', clientId);
-    }
-    if (topics) {
-      params.set('topics', topics);
-    }
-    if (params.toString()) {
-      websocketUrl += `?${params.toString()}`;
-    }
-    
-    const response = {
-      websocket: {
-        url: websocketUrl,
-        path: '/ws',
-        protocol: 'ws',
-        clientId: clientId || null,
-        topics: topics ? topics.split(',') : null,
-        description: 'WebSocket connection endpoint for real-time communication'
-      },
-      connection: {
-        instructions: [
-          'Connect to the WebSocket URL using any WebSocket client',
-          'Send messages as JSON format: { "text": "your message" }',
-          'Subscribe to topics via URL query parameter: ?topics=topic1,topic2',
-          'Or send subscription message: { "type": "subscribe", "topics": ["topic1", "topic2"] }',
-          'Unsubscribe: { "type": "unsubscribe", "topics": ["topic1"] }'
-        ]
-      },
-      server: {
-        status: 'running',
-        connectedClients: clients.size,
-        timestamp: new Date().toISOString()
-      }
-    };
+function parseIncomingMessage(data: Buffer, clientId: string): any | null {
+  try {
+    return JSON.parse(data.toString());
+  } catch (parseError) {
+    debugLog(`Error parsing JSON from client ${clientId}:`, parseError);
+    return null;
+  }
+}
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(response, null, 2));
+function sendErrorMessage(ws: WebSocket, message: string): void {
+  ws.send(JSON.stringify({
+    type: 'error',
+    message: message,
+    timestamp: new Date().toISOString()
+  }));
+}
+
+function handleSubscriptionRequest(
+  ws: WebSocket,
+  clientWs: ClientWebSocket,
+  topics: string[]
+): void {
+  const topicsToSubscribe = topics.filter((topic: string) => typeof topic === 'string' && topic.trim());
+  const newTopics: string[] = [];
+  
+  topicsToSubscribe.forEach((topic: string) => {
+    if (!clientWs.subscribedTopics?.has(topic)) {
+      clientWs.subscribedTopics?.add(topic);
+      clientWs.redisSubscriber?.subscribe(topic);
+      newTopics.push(topic);
+      debugLog(`📡 Client ${clientWs.clientId} subscribed to topic: ${topic}`);
+    }
+  });
+  
+  ws.send(JSON.stringify({
+    type: 'subscribed',
+    topics: newTopics,
+    allSubscribedTopics: Array.from(clientWs.subscribedTopics || []),
+    timestamp: new Date().toISOString()
+  }));
+}
+
+function handleUnsubscriptionRequest(
+  ws: WebSocket,
+  clientWs: ClientWebSocket,
+  topics: string[]
+): void {
+  const topicsToUnsubscribe = topics.filter((topic: string) => typeof topic === 'string' && topic.trim());
+  const removedTopics: string[] = [];
+  
+  topicsToUnsubscribe.forEach((topic: string) => {
+    if (clientWs.subscribedTopics?.has(topic)) {
+      clientWs.subscribedTopics.delete(topic);
+      clientWs.redisSubscriber?.unsubscribe(topic);
+      removedTopics.push(topic);
+      debugLog(`📡 Client ${clientWs.clientId} unsubscribed from topic: ${topic}`);
+    }
+  });
+  
+  ws.send(JSON.stringify({
+    type: 'unsubscribed',
+    topics: removedTopics,
+    allSubscribedTopics: Array.from(clientWs.subscribedTopics || []),
+    timestamp: new Date().toISOString()
+  }));
+}
+
+async function publishClientMessageToRedis(
+  redis: Redis,
+  clientWs: ClientWebSocket,
+  message: any
+): Promise<void> {
+  if (!clientWs.redisTopic) {
     return;
   }
 
-  // GET endpoint for list of connected clients
-  if (req.method === 'GET' && req.url === '/api/clients') {
-    const connectedClients = Array.from(clients)
-      .filter((client) => client.readyState === WebSocket.OPEN)
-      .map((client) => {
-        const clientWs = client as ClientWebSocket;
-        return {
-          clientId: clientWs.clientId || 'unknown'
-        };
-      });
-
-    const response = {
-      clients: connectedClients,
-      count: connectedClients.length,
+  try {
+    const redisMessage = JSON.stringify({
+      clientId: clientWs.clientId,
+      clientIp: clientWs.clientIp,
+      message: message,
       timestamp: new Date().toISOString()
-    };
+    });
+    
+    await redis.publish(clientWs.redisTopic, redisMessage);
+    debugLog(`📤 Published message to Redis topic: ${clientWs.redisTopic}`);
+  } catch (redisError) {
+    debugLog(`Redis publish error for client ${clientWs.clientId}:`, redisError);
+  }
+}
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify(response, null, 2));
+async function processIncomingMessage(
+  ws: WebSocket,
+  clientWs: ClientWebSocket,
+  message: any,
+  redis: Redis
+): Promise<void> {
+  try {
+    console.log(`Received message from client ${clientWs.clientId} (IP: ${clientWs.clientIp}):`, message);
+
+    if (message.type === 'subscribe' && Array.isArray(message.topics)) {
+      handleSubscriptionRequest(ws, clientWs, message.topics);
+      return;
+    }
+    
+    if (message.type === 'unsubscribe' && Array.isArray(message.topics)) {
+      handleUnsubscriptionRequest(ws, clientWs, message.topics);
+      return;
+    }
+
+    await publishClientMessageToRedis(redis, clientWs, message);
+  } catch (error) {
+    debugLog(`Error processing message from client ${clientWs.clientId}:`, error);
+    sendErrorMessage(ws, 'Error processing message');
+  }
+}
+
+function cleanupClientResources(clientWs: ClientWebSocket, ws: WebSocket): void {
+  debugLog(`Client ${clientWs.clientId} (IP: ${clientWs.clientIp}, Redis Topic: ${clientWs.redisTopic}) disconnected`);
+  
+  if (clientWs.redisSubscriber) {
+    clientWs.redisSubscriber.quit();
+  }
+  
+  clients.delete(ws);
+}
+
+function buildWebSocketUrl(req: any, clientId: string | null, topics: string | null): string {
+  const host = req.headers.host || `localhost:${PORT}`;
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const protocol = forwardedProto === 'https' ? 'wss' : 'ws';
+  
+  let websocketUrl = `${protocol}://${host}/ws`;
+  const params = new URLSearchParams();
+  if (clientId) {
+    params.set('clientId', clientId);
+  }
+  if (topics) {
+    params.set('topics', topics);
+  }
+  if (params.toString()) {
+    websocketUrl += `?${params.toString()}`;
+  }
+  return websocketUrl;
+}
+
+function buildWebSocketInfoResponse(req: any, clientId: string | null, topics: string | null): any {
+  const websocketUrl = buildWebSocketUrl(req, clientId, topics);
+  
+  return {
+    websocket: {
+      url: websocketUrl,
+      path: '/ws',
+      protocol: 'ws',
+      clientId: clientId || null,
+      topics: topics ? topics.split(',') : null,
+      description: 'WebSocket connection endpoint for real-time communication'
+    },
+    connection: {
+      instructions: [
+        'Connect to the WebSocket URL using any WebSocket client',
+        'Send messages as JSON format: { "text": "your message" }',
+        'Subscribe to topics via URL query parameter: ?topics=topic1,topic2',
+        'Or send subscription message: { "type": "subscribe", "topics": ["topic1", "topic2"] }',
+        'Unsubscribe: { "type": "unsubscribe", "topics": ["topic1"] }'
+      ]
+    },
+    server: {
+      status: 'running',
+      connectedClients: clients.size,
+      timestamp: new Date().toISOString()
+    }
+  };
+}
+
+function buildConnectedClientsResponse(): any {
+  const connectedClients = Array.from(clients)
+    .filter((client) => client.readyState === WebSocket.OPEN)
+    .map((client) => {
+      const clientWs = client as ClientWebSocket;
+      return {
+        clientId: clientWs.clientId || 'unknown'
+      };
+    });
+
+  return {
+    clients: connectedClients,
+    count: connectedClients.length,
+    timestamp: new Date().toISOString()
+  };
+}
+
+function sendJsonResponse(res: any, statusCode: number, data: any): void {
+  res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(data, null, 2));
+}
+
+function handleWebSocketInfoEndpoint(req: any, res: any): void {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+  const clientId = url.searchParams.get('clientId');
+  const topics = url.searchParams.get('topics');
+  const response = buildWebSocketInfoResponse(req, clientId, topics);
+  sendJsonResponse(res, 200, response);
+}
+
+function handleConnectedClientsListEndpoint(req: any, res: any): void {
+  const response = buildConnectedClientsResponse();
+  sendJsonResponse(res, 200, response);
+}
+
+server.on('request', (req, res) => {
+  if (req.method === 'GET' && req.url?.startsWith('/api/websocket')) {
+    handleWebSocketInfoEndpoint(req, res);
     return;
   }
 
-  // Default 404 for other routes
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'Not Found' }));
+  if (req.method === 'GET' && req.url === '/api/clients') {
+    handleConnectedClientsListEndpoint(req, res);
+    return;
+  }
+
+  sendJsonResponse(res, 404, { error: 'Not Found' });
 });
 
-// Start server
-server.listen(PORT, () => {
+function logServerStartup(): void {
   debugLog(`WebSocket server is running on ws://localhost:${PORT}/ws`);
   debugLog(`HTTP server is running on http://localhost:${PORT}`);
   debugLog(`WebSocket info endpoint: http://localhost:${PORT}/api/websocket`);
   debugLog(`Connected clients endpoint: http://localhost:${PORT}/api/clients`);
-});
+}
 
-// Graceful shutdown
-process.on('SIGINT', () => {
+function shutdownServer(): void {
   debugLog('\nShutting down server...');
   wss.close(() => {
     server.close(() => {
@@ -381,4 +446,7 @@ process.on('SIGINT', () => {
       });
     });
   });
-});
+}
+
+server.listen(PORT, logServerStartup);
+process.on('SIGINT', shutdownServer);
